@@ -6,19 +6,29 @@ import { Adapter, MetadataType, Parser } from '~/config/enum';
 import { ENV } from '~/config/env';
 import { cacheSearchResultLink, getCachedSearchResultLink } from '~/services/cache';
 import type { SearchMetadata, SearchResultLink } from '~/services/search';
-import { getResultWithBestScore } from '~/utils/compare';
+import { scoreMatch } from '~/utils/compare';
 import HttpClient from '~/utils/http-client';
 import { logger } from '~/utils/logger';
 import { getCheerioDoc } from '~/utils/scraper';
 import { getServiceGuard } from '~/utils/service-guard';
 
+// Result links by shape, not by shelf label: shelf labels ("Songs") are
+// localized, and a song row also links its artist, which used to win the
+// score for titles Apple translates (沙發 -> "Drown in Sofa" on us).
 const APPLE_MUSIC_SEARCH_TYPES = {
-  [MetadataType.Song]: 'Songs',
-  [MetadataType.Album]: 'Albums',
-  [MetadataType.Playlist]: 'Playlists',
-  [MetadataType.Artist]: 'Artists',
+  [MetadataType.Song]: 'a[href*="?i="]',
+  [MetadataType.Album]: 'a[href*="/album/"]:not([href*="?i="])',
+  [MetadataType.Playlist]: 'a[href*="/playlist/"]',
+  [MetadataType.Artist]: 'a[href*="/artist/"]',
   [MetadataType.Podcast]: undefined,
   [MetadataType.Show]: undefined,
+};
+
+// Top-result links carry "<title> · <type> · <artist>" (U+2004 around the
+// dot); scoring title plus artist matches a query that names the artist.
+const resultText = (label: string | undefined, text: string) => {
+  const parts = label?.split(/\s·\s/);
+  return parts && parts.length > 2 ? `${parts[0]} ${parts.at(-1)}` : text;
 };
 
 export async function getAppleMusicLink(
@@ -56,11 +66,25 @@ export async function getAppleMusicLink(
     guard.recordSuccess();
     const doc = getCheerioDoc(html);
 
-    const listElements = doc(
-      `${searchType ? 'div[aria-label="' + searchType + '"]' : ''} a[href^="https://music.apple.com/"]:lt(3)`
-    );
+    const candidates = doc(`${searchType}[href^="https://music.apple.com/"]`)
+      .map((_, el) => ({
+        href: doc(el).attr('href') ?? '',
+        text: resultText(doc(el).attr('aria-label'), doc(el).text().trim()),
+      }))
+      .get()
+      .filter(candidate => candidate.text)
+      .slice(0, 3);
 
-    const { href, score } = getResultWithBestScore(doc, listElements, query);
+    const { href, score } = candidates.reduce(
+      (best, candidate) => {
+        const candidateScore = scoreMatch(candidate.text, query);
+        return candidateScore > best.score
+          ? { href: candidate.href, score: candidateScore }
+          : best;
+      },
+      { href: '', score: 0 }
+    );
+    if (!href) throw new Error(`Result with best score not found for: ${query}`);
 
     // Convert music.apple.com links to geo.music.apple.com links for better results
     const geoUrl = href.replace('music.apple.com', 'geo.music.apple.com');

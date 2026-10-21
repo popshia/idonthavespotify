@@ -498,7 +498,7 @@ describe('GET /search', () => {
           {
             type: 'appleMusic',
             url: 'https://geo.music.apple.com/ca/album/stories/1440834059',
-            isVerified: false,
+            isVerified: true,
             notAvailable: false,
           },
           {
